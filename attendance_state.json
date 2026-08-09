@@ -1,0 +1,123 @@
+{
+  "subjects": [
+    {
+      "serial": "1",
+      "subject": "Data Warehousing and Data Mining",
+      "classes_held": 18,
+      "classes_present": 18,
+      "percentage": 100.0
+    },
+    {
+      "serial": "2",
+      "subject": "Computer Networks",
+      "classes_held": 12,
+      "classes_present": 11,
+      "percentage": 91.7
+    },
+    {
+      "serial": "3",
+      "subject": "Formal Languages and Automata Theory",
+      "classes_held": 15,
+      "classes_present": 13,
+      "percentage": 86.7
+    },
+    {
+      "serial": "4",
+      "subject": "Artificial Intelligence",
+      "classes_held": 16,
+      "classes_present": 15,
+      "percentage": 93.8
+    },
+    {
+      "serial": "5",
+      "subject": "Sustainable Energy Technologies",
+      "classes_held": 16,
+      "classes_present": 13,
+      "percentage": 81.3
+    },
+    {
+      "serial": "6",
+      "subject": "Data Mining Lab",
+      "classes_held": 18,
+      "classes_present": 18,
+      "percentage": 100.0
+    },
+    {
+      "serial": "7",
+      "subject": "Computer Networks Lab",
+      "classes_held": 6,
+      "classes_present": 6,
+      "percentage": 100.0
+    },
+    {
+      "serial": "8",
+      "subject": "Full Stack Development-II",
+      "classes_held": 15,
+      "classes_present": 12,
+      "percentage": 80.0
+    },
+    {
+      "serial": "9",
+      "subject": "User Interface Design using Flutter",
+      "classes_held": 10,
+      "classes_present": 10,
+      "percentage": 100.0
+    },
+    {
+      "serial": "10",
+      "subject": "Principles of Cyber Security",
+      "classes_held": 18,
+      "classes_present": 16,
+      "percentage": 88.9
+    },
+    {
+      "serial": "11",
+      "subject": "Cyber Security Lab",
+      "classes_held": 30,
+      "classes_present": 24,
+      "percentage": 80.0
+    },
+    {
+      "serial": "12",
+      "subject": "ASSOCIATION",
+      "classes_held": 5,
+      "classes_present": 4,
+      "percentage": 80.0
+    },
+    {
+      "serial": "13",
+      "subject": "Technical Training",
+      "classes_held": 18,
+      "classes_present": 18,
+      "percentage": 100.0
+    },
+    {
+      "serial": "14",
+      "subject": "TUTORIAL",
+      "classes_held": 1,
+      "classes_present": 1,
+      "percentage": 100.0
+    }
+  ],
+  "overall": 90.4,
+  "monthly": [
+    {
+      "month": "June",
+      "total": 12,
+      "present": 10,
+      "percentage": 83.33
+    },
+    {
+      "month": "July",
+      "total": 146,
+      "present": 136,
+      "percentage": 93.15
+    },
+    {
+      "month": "August",
+      "total": 40,
+      "present": 33,
+      "percentage": 82.5
+    }
+  ]
+}
