@@ -1,5 +1,8 @@
-.env 
-__pycache__/ 
-*.pyc 
-*.png 
-*.html 
+.env
+__pycache__/
+*.pyc
+*.png
+*.html
+login_failed.png
+attendance_empty.png
+attendance_table_not_found.png

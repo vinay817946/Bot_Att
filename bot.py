@@ -1,15 +1,25 @@
 import os
+import json
 import asyncio
 import logging
-import json
 from datetime import datetime
+from typing import Optional
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from dotenv import load_dotenv
 
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
     ContextTypes,
 )
 
@@ -17,29 +27,47 @@ from erp_monitor import LBRCEMonitor
 
 
 # =========================================================
-# CONFIG
+# LOAD ENVIRONMENT
 # =========================================================
 
 load_dotenv()
 
+
+# =========================================================
+# CONFIG
+# =========================================================
+
 BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
-    ""
+    "",
 ).strip()
 
 CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
-    ""
+    "",
+).strip()
+
+WEBHOOK_SECRET = os.getenv(
+    "WEBHOOK_SECRET",
+    "lbrce-secret",
+).strip()
+
+RENDER_EXTERNAL_URL = os.getenv(
+    "RENDER_EXTERNAL_URL",
+    "",
+).strip()
+
+CHECK_SECRET = os.getenv(
+    "CHECK_SECRET",
+    "check-secret",
 ).strip()
 
 CHECK_INTERVAL = int(
     os.getenv(
         "CHECK_INTERVAL",
-        "300"
+        "60",
     )
 )
-
-STATE_FILE = "attendance_state.json"
 
 
 # =========================================================
@@ -47,117 +75,125 @@ STATE_FILE = "attendance_state.json"
 # =========================================================
 
 logging.basicConfig(
+    level=logging.INFO,
     format=(
         "%(asctime)s - "
-        "%(name)s - "
         "%(levelname)s - "
         "%(message)s"
     ),
-    level=logging.INFO,
 )
 
 logger = logging.getLogger(__name__)
 
 
 # =========================================================
+# FASTAPI
+# =========================================================
+
+app = FastAPI(
+    title="MyLBRCEBot",
+)
+
+
+# =========================================================
 # GLOBALS
 # =========================================================
 
-monitor = None
+monitor: Optional[LBRCEMonitor] = None
 
 last_attendance = None
 
 last_check_time = None
 
+last_check_status = "Not checked yet"
+
+telegram_application = None
+
 monitor_task = None
 
-shutdown_event = asyncio.Event()
+attendance_lock = None
 
 
 # =========================================================
-# STATE MANAGEMENT
+# KEYBOARD
 # =========================================================
 
-def load_attendance_state():
-    """
-    Load previous attendance from disk.
+def main_keyboard():
 
-    This allows the bot to remember the previous
-    attendance even after restarting.
-    """
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📊 Check Attendance",
+                callback_data="attendance",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🟢 Bot Status",
+                callback_data="status",
+            ),
+        ],
+    ]
 
-    if not os.path.exists(STATE_FILE):
-        logger.info(
-            "No previous attendance state found."
-        )
-        return None
-
-    try:
-
-        with open(
-            STATE_FILE,
-            "r",
-            encoding="utf-8",
-        ) as file:
-
-            data = json.load(file)
-
-        logger.info(
-            "Previous attendance state loaded."
-        )
-
-        return data
-
-    except Exception as exc:
-
-        logger.error(
-            "Could not load attendance state: %s",
-            exc,
-        )
-
-        return None
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
-def save_attendance_state(data):
-    """
-    Save latest attendance to disk.
-    """
+def attendance_keyboard():
 
-    try:
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh Attendance",
+                callback_data="attendance",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🟢 Bot Status",
+                callback_data="status",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Main Menu",
+                callback_data="menu",
+            ),
+        ],
+    ]
 
-        temporary_file = (
-            STATE_FILE + ".tmp"
-        )
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
-        with open(
-            temporary_file,
-            "w",
-            encoding="utf-8",
-        ) as file:
 
-            json.dump(
-                data,
-                file,
-                indent=2,
-                ensure_ascii=False,
-            )
+def status_keyboard():
 
-        # Replace old state atomically.
-        os.replace(
-            temporary_file,
-            STATE_FILE,
-        )
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📊 Check Attendance",
+                callback_data="attendance",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh Status",
+                callback_data="status",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Main Menu",
+                callback_data="menu",
+            ),
+        ],
+    ]
 
-        logger.info(
-            "Attendance state saved."
-        )
-
-    except Exception as exc:
-
-        logger.error(
-            "Could not save attendance state: %s",
-            exc,
-        )
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 # =========================================================
@@ -168,16 +204,16 @@ def format_attendance(data):
 
     subjects = data.get(
         "subjects",
-        []
+        [],
     )
 
     overall = data.get(
-        "overall"
+        "overall",
     )
 
     monthly = data.get(
         "monthly",
-        []
+        [],
     )
 
     lines = []
@@ -188,26 +224,32 @@ def format_attendance(data):
 
     lines.append("")
 
+    if not subjects:
+
+        lines.append(
+            "⚠️ No subject attendance found."
+        )
+
     for item in subjects:
 
         subject = item.get(
             "subject",
-            "Unknown"
+            "Unknown",
         )
 
         present = item.get(
             "classes_present",
-            0
+            0,
         )
 
         held = item.get(
             "classes_held",
-            0
+            0,
         )
 
         percentage = item.get(
             "percentage",
-            0
+            0,
         )
 
         lines.append(
@@ -236,11 +278,30 @@ def format_attendance(data):
 
         for month in monthly:
 
+            month_name = month.get(
+                "month",
+                "",
+            )
+
+            present = month.get(
+                "present",
+                0,
+            )
+
+            total = month.get(
+                "total",
+                0,
+            )
+
+            percentage = month.get(
+                "percentage",
+                0,
+            )
+
             lines.append(
-                f"{month.get('month', 'Unknown')}: "
-                f"{month.get('present', 0)}/"
-                f"{month.get('total', 0)} "
-                f"({month.get('percentage', 0):.2f}%)"
+                f"{month_name}: "
+                f"{present}/{total} "
+                f"({percentage:.2f}%)"
             )
 
     return "\n".join(lines)
@@ -255,11 +316,14 @@ async def start_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
+    if not update.message:
+        return
+
     await update.message.reply_text(
-        "👋 Welcome to MyLBRCEBot!\n\n"
-        "Commands:\n"
-        "/attendance - Check attendance\n"
-        "/status - Bot status\n"
+        "👋 *Welcome to MyLBRCEBot!*\n\n"
+        "Choose an option:",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard(),
     )
 
 
@@ -272,7 +336,8 @@ async def attendance_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    global monitor
+    if not update.message:
+        return
 
     message = await update.message.reply_text(
         "🔄 Checking LBRCE attendance..."
@@ -280,13 +345,7 @@ async def attendance_command(
 
     try:
 
-        if monitor is None:
-
-            monitor = LBRCEMonitor()
-
-            await monitor.start()
-
-        data = await monitor.get_attendance()
+        data = await get_attendance_safely()
 
         text = format_attendance(
             data
@@ -295,18 +354,20 @@ async def attendance_command(
         await message.edit_text(
             text,
             parse_mode="Markdown",
+            reply_markup=attendance_keyboard(),
         )
 
     except Exception as exc:
 
         logger.exception(
-            "Attendance command failed"
+            "Attendance command failed."
         )
 
         await message.edit_text(
-            "❌ Attendance check failed.\n\n"
+            "❌ *Attendance check failed.*\n\n"
             f"`{str(exc)}`",
             parse_mode="Markdown",
+            reply_markup=main_keyboard(),
         )
 
 
@@ -319,120 +380,262 @@ async def status_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    global last_check_time
+    if not update.message:
+        return
 
-    if last_check_time:
-
-        text = (
-            "🟢 *Bot is running.*\n\n"
-            f"Last successful check:\n"
-            f"`{last_check_time}`"
-        )
-
-    else:
-
-        text = (
-            "🟢 *Bot is running.*\n\n"
-            "Attendance has not been checked yet."
-        )
+    text = get_status_text()
 
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
+        reply_markup=status_keyboard(),
     )
 
 
 # =========================================================
-# CHECK ATTENDANCE ONCE
+# STATUS TEXT
 # =========================================================
 
-async def check_attendance_once(
-    application
+def get_status_text():
+
+    global last_check_time
+    global last_check_status
+    global monitor
+
+    if monitor is not None:
+
+        monitor_status = (
+            "✅ LBRCE monitor initialized"
+        )
+
+    else:
+
+        monitor_status = (
+            "⏳ LBRCE monitor not initialized"
+        )
+
+    if last_check_time:
+
+        last_check = last_check_time
+
+    else:
+
+        last_check = "Not checked yet"
+
+    return (
+        "🟢 *MyLBRCEBot Status*\n\n"
+        "✅ Telegram Bot: Running\n"
+        "✅ Web Server: Running\n"
+        f"{monitor_status}\n\n"
+        f"📡 Last check:\n"
+        f"`{last_check}`\n\n"
+        f"📌 Last result:\n"
+        f"`{last_check_status}`"
+    )
+
+
+# =========================================================
+# BUTTON CALLBACK
+# =========================================================
+
+async def button_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
 ):
+
+    query = update.callback_query
+
+    if not query:
+        return
+
+    await query.answer()
+
+    if query.data == "menu":
+
+        await query.edit_message_text(
+            "👋 *Welcome to MyLBRCEBot!*\n\n"
+            "Choose an option:",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ATTENDANCE BUTTON
+    # -----------------------------------------------------
+
+    if query.data == "attendance":
+
+        await query.edit_message_text(
+            "🔄 *Checking LBRCE attendance...*",
+            parse_mode="Markdown",
+        )
+
+        try:
+
+            data = await get_attendance_safely()
+
+            text = format_attendance(
+                data
+            )
+
+            await query.edit_message_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=attendance_keyboard(),
+            )
+
+        except Exception as exc:
+
+            logger.exception(
+                "Attendance button failed."
+            )
+
+            await query.edit_message_text(
+                "❌ *Attendance check failed.*\n\n"
+                f"`{str(exc)}`",
+                parse_mode="Markdown",
+                reply_markup=main_keyboard(),
+            )
+
+        return
+
+    # -----------------------------------------------------
+    # STATUS BUTTON
+    # -----------------------------------------------------
+
+    if query.data == "status":
+
+        await query.edit_message_text(
+            get_status_text(),
+            parse_mode="Markdown",
+            reply_markup=status_keyboard(),
+        )
+
+        return
+
+
+# =========================================================
+# GET ATTENDANCE SAFELY
+# =========================================================
+
+async def get_attendance_safely():
+
+    global monitor
+    global last_check_time
+    global last_check_status
+
+    if monitor is None:
+
+        logger.info(
+            "Creating LBRCE monitor..."
+        )
+
+        monitor = LBRCEMonitor()
+
+        await monitor.start()
+
+    try:
+
+        data = await monitor.get_attendance()
+
+    except Exception as exc:
+
+        logger.exception(
+            "Attendance retrieval failed."
+        )
+
+        # -------------------------------------------------
+        # Recreate browser/session once.
+        # This handles stale Playwright/ERP sessions.
+        # -------------------------------------------------
+
+        logger.warning(
+            "Recreating LBRCE browser session..."
+        )
+
+        try:
+            await monitor.close()
+        except Exception:
+            pass
+
+        monitor = LBRCEMonitor()
+
+        await monitor.start()
+
+        data = await monitor.get_attendance()
+
+    last_check_time = (
+        datetime.now().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    )
+
+    last_check_status = "SUCCESS"
+
+    return data
+
+
+# =========================================================
+# BACKGROUND ATTENDANCE CHECK
+# =========================================================
+
+async def check_attendance_once():
 
     global monitor
     global last_attendance
     global last_check_time
+    global last_check_status
+    global telegram_application
+
+    logger.info(
+        "Checking LBRCE attendance..."
+    )
 
     try:
 
-        logger.info(
-            "Checking LBRCE attendance..."
-        )
+        data = await get_attendance_safely()
 
         # -------------------------------------------------
-        # Create monitor if necessary
-        # -------------------------------------------------
-
-        if monitor is None:
-
-            logger.info(
-                "Creating LBRCE monitor..."
-            )
-
-            monitor = LBRCEMonitor()
-
-            await monitor.start()
-
-        # -------------------------------------------------
-        # Get attendance
-        # -------------------------------------------------
-
-        data = await monitor.get_attendance()
-
-        last_check_time = (
-            datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-        )
-
-        # -------------------------------------------------
-        # First successful check
+        # FIRST SUCCESSFUL CHECK
         # -------------------------------------------------
 
         if last_attendance is None:
 
             last_attendance = data
 
-            save_attendance_state(
-                data
-            )
-
             logger.info(
                 "Initial attendance saved."
             )
 
-            return
-
-        # -------------------------------------------------
-        # Previous subjects
-        # -------------------------------------------------
+            return {
+                "status": "initial",
+                "changes": [],
+                "attendance": data,
+            }
 
         old_subjects = {
-            item.get("subject"): item
+            item["subject"]: item
             for item in last_attendance.get(
                 "subjects",
-                []
+                [],
             )
         }
 
-        # -------------------------------------------------
-        # New subjects
-        # -------------------------------------------------
-
         new_subjects = {
-            item.get("subject"): item
+            item["subject"]: item
             for item in data.get(
                 "subjects",
-                []
+                [],
             )
         }
 
         changes = []
 
-        # =================================================
-        # COMPARE SUBJECTS
-        # =================================================
+        # -------------------------------------------------
+        # SUBJECT COMPARISON
+        # -------------------------------------------------
 
         for subject, new in new_subjects.items():
 
@@ -440,44 +643,33 @@ async def check_attendance_once(
                 subject
             )
 
-            # ------------------------------------------------
-            # New subject
-            # ------------------------------------------------
-
             if old is None:
 
                 changes.append(
-                    f"➕ *New subject detected*\n"
-                    f"📚 {subject}\n"
-                    f"Attendance: "
-                    f"{new.get('percentage', 0):.2f}%"
+                    f"➕ New subject: {subject}"
                 )
 
                 continue
 
             old_held = old.get(
                 "classes_held",
-                0
+                0,
             )
 
             new_held = new.get(
                 "classes_held",
-                0
+                0,
             )
 
             old_present = old.get(
                 "classes_present",
-                0
+                0,
             )
 
             new_present = new.get(
                 "classes_present",
-                0
+                0,
             )
-
-            # =================================================
-            # NEW CLASS ADDED
-            # =================================================
 
             if new_held > old_held:
 
@@ -491,15 +683,15 @@ async def check_attendance_once(
 
                 if added_present > 0:
 
-                    status = "✅ *PRESENT*"
+                    status = "✅ PRESENT"
 
                 else:
 
-                    status = "❌ *ABSENT*"
+                    status = "❌ ABSENT"
 
                 changes.append(
                     f"{status}\n"
-                    f"📚 *{subject}*\n"
+                    f"📚 {subject}\n"
                     f"New class(es): "
                     f"{added_classes}\n"
                     f"Present: "
@@ -509,26 +701,9 @@ async def check_attendance_once(
                     f"{new.get('percentage', 0):.2f}%"
                 )
 
-            # =================================================
-            # ATTENDANCE CORRECTION
-            # =================================================
-
-            elif new_present != old_present:
-
-                changes.append(
-                    f"⚠️ *Attendance corrected*\n"
-                    f"📚 *{subject}*\n"
-                    f"Previous: "
-                    f"{old_present}/{old_held}\n"
-                    f"Current: "
-                    f"{new_present}/{new_held}\n"
-                    f"Attendance: "
-                    f"{new.get('percentage', 0):.2f}%"
-                )
-
-        # =================================================
-        # OVERALL ATTENDANCE
-        # =================================================
+        # -------------------------------------------------
+        # OVERALL COMPARISON
+        # -------------------------------------------------
 
         old_overall = (
             last_attendance.get(
@@ -549,40 +724,42 @@ async def check_attendance_once(
         ):
 
             changes.append(
-                f"🎯 *Overall attendance changed*\n"
+                "🎯 Overall attendance changed:\n"
                 f"{old_overall:.2f}% → "
                 f"{new_overall:.2f}%"
             )
 
-        # =================================================
-        # SAVE NEW STATE
-        # =================================================
+        # -------------------------------------------------
+        # SAVE STATE
+        # -------------------------------------------------
 
         last_attendance = data
 
-        save_attendance_state(
-            data
-        )
+        last_check_status = "SUCCESS"
 
-        # =================================================
-        # SEND TELEGRAM NOTIFICATION
-        # =================================================
+        # -------------------------------------------------
+        # SEND NOTIFICATION
+        # -------------------------------------------------
 
-        if changes:
+        if (
+            changes
+            and telegram_application
+        ):
 
             message = (
                 "🔔 *LBRCE Attendance Update*\n\n"
                 + "\n\n".join(changes)
             )
 
-            await application.bot.send_message(
+            await telegram_application.bot.send_message(
                 chat_id=CHAT_ID,
                 text=message,
                 parse_mode="Markdown",
+                reply_markup=main_keyboard(),
             )
 
             logger.info(
-                "Attendance update sent to Telegram."
+                "Attendance update sent."
             )
 
         else:
@@ -591,244 +768,206 @@ async def check_attendance_once(
                 "No attendance changes."
             )
 
-        return True
+        return {
+            "status": "success",
+            "changes": changes,
+            "attendance": data,
+        }
 
     except Exception as exc:
 
-        logger.exception(
-            "Attendance monitoring error"
+        last_check_status = (
+            f"FAILED: {str(exc)[:200]}"
         )
 
-        return False
+        logger.exception(
+            "Attendance monitoring error."
+        )
+
+        raise
 
 
 # =========================================================
 # BACKGROUND MONITOR
 # =========================================================
 
-async def attendance_monitor(
-    application
-):
+async def background_monitor():
 
     logger.info(
         "Background attendance monitor started."
     )
 
-    # -----------------------------------------------------
-    # Small startup delay
-    # -----------------------------------------------------
+    logger.info(
+        "Check interval: %s seconds",
+        CHECK_INTERVAL,
+    )
 
-    try:
+    # Give the web server and Telegram
+    # application time to initialize.
 
-        await asyncio.wait_for(
-            shutdown_event.wait(),
-            timeout=10,
-        )
+    await asyncio.sleep(15)
 
-        return
-
-    except asyncio.TimeoutError:
-
-        pass
-
-    # =====================================================
-    # MAIN LOOP
-    # =====================================================
-
-    while not shutdown_event.is_set():
+    while True:
 
         try:
 
-            await check_attendance_once(
-                application
-            )
-
-        except asyncio.CancelledError:
-
-            logger.info(
-                "Attendance monitor cancelled."
-            )
-
-            raise
+            await check_attendance_once()
 
         except Exception:
 
             logger.exception(
-                "Background monitor error."
+                "Background attendance check failed."
             )
 
-        # -------------------------------------------------
-        # Wait using shutdown event.
-        #
-        # This is better than:
-        #
-        # await asyncio.sleep(...)
-        #
-        # because shutdown can interrupt the wait.
-        # -------------------------------------------------
-
-        try:
-
-            await asyncio.wait_for(
-                shutdown_event.wait(),
-                timeout=CHECK_INTERVAL,
-            )
-
-        except asyncio.TimeoutError:
-
-            pass
-
-    logger.info(
-        "Background attendance monitor stopped."
-    )
-
-
-# =========================================================
-# POST INITIALIZATION
-# =========================================================
-
-async def post_init(
-    application
-):
-
-    global monitor_task
-    global last_attendance
-
-    logger.info(
-        "Application initialization started."
-    )
-
-    # -----------------------------------------------------
-    # Load previous state
-    # -----------------------------------------------------
-
-    last_attendance = (
-        load_attendance_state()
-    )
-
-    if last_attendance is not None:
-
-        logger.info(
-            "Previous attendance loaded "
-            "into memory."
+        await asyncio.sleep(
+            CHECK_INTERVAL
         )
 
-    # -----------------------------------------------------
-    # Create background task
-    # -----------------------------------------------------
 
-    monitor_task = asyncio.create_task(
-        attendance_monitor(
-            application
-        )
-    )
+# =========================================================
+# ROOT
+# =========================================================
 
-    logger.info(
-        "Background attendance task created."
-    )
+@app.get("/")
+async def root():
+
+    return {
+        "status": "online",
+        "bot": "MyLBRCEBot",
+    }
 
 
 # =========================================================
-# POST SHUTDOWN
+# HEALTH
 # =========================================================
 
-async def post_shutdown(
-    application
+@app.get("/health")
+async def health():
+
+    return {
+        "status": "ok",
+        "bot": "MyLBRCEBot",
+        "time": datetime.now().isoformat(),
+        "last_check": last_check_time,
+        "last_status": last_check_status,
+    }
+
+
+# =========================================================
+# TELEGRAM WEBHOOK
+# =========================================================
+
+@app.post("/telegram-webhook")
+async def telegram_webhook(
+    request: Request,
 ):
 
-    global monitor
+    global telegram_application
+
+    if telegram_application is None:
+
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Telegram application not ready"
+            },
+        )
+
+    secret = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token"
+    )
+
+    if secret != WEBHOOK_SECRET:
+
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "forbidden"
+            },
+        )
+
+    try:
+
+        data = await request.json()
+
+        update = Update.de_json(
+            data,
+            telegram_application.bot,
+        )
+
+        await telegram_application.process_update(
+            update
+        )
+
+        return {
+            "ok": True
+        }
+
+    except Exception as exc:
+
+        logger.exception(
+            "Webhook error."
+        )
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(exc)
+            },
+        )
+
+
+# =========================================================
+# EXTERNAL CHECK
+# =========================================================
+
+@app.get("/check")
+async def scheduled_check(
+    request: Request,
+):
+
+    secret = request.query_params.get(
+        "secret"
+    )
+
+    if secret != CHECK_SECRET:
+
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "forbidden"
+            },
+        )
+
+    try:
+
+        result = await check_attendance_once()
+
+        return {
+            "ok": True,
+            "result": result,
+        }
+
+    except Exception as exc:
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": str(exc),
+            },
+        )
+
+
+# =========================================================
+# STARTUP
+# =========================================================
+
+@app.on_event("startup")
+async def startup():
+
+    global telegram_application
     global monitor_task
-
-    logger.info(
-        "Starting graceful shutdown..."
-    )
-
-    # -----------------------------------------------------
-    # Tell monitor loop to stop
-    # -----------------------------------------------------
-
-    shutdown_event.set()
-
-    # -----------------------------------------------------
-    # Wait for monitor task
-    # -----------------------------------------------------
-
-    if monitor_task:
-
-        try:
-
-            await asyncio.wait_for(
-                monitor_task,
-                timeout=15,
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.warning(
-                "Monitor task did not stop "
-                "within 15 seconds."
-            )
-
-            monitor_task.cancel()
-
-            try:
-
-                await monitor_task
-
-            except asyncio.CancelledError:
-
-                pass
-
-        except asyncio.CancelledError:
-
-            pass
-
-        except Exception as exc:
-
-            logger.error(
-                "Monitor task shutdown error: %s",
-                exc,
-            )
-
-    # -----------------------------------------------------
-    # Close Playwright
-    # -----------------------------------------------------
-
-    if monitor:
-
-        try:
-
-            logger.info(
-                "Closing LBRCE browser..."
-            )
-
-            await monitor.close()
-
-            logger.info(
-                "LBRCE browser closed."
-            )
-
-        except Exception as exc:
-
-            logger.error(
-                "Error closing LBRCE monitor: %s",
-                exc,
-            )
-
-        finally:
-
-            monitor = None
-
-    logger.info(
-        "Graceful shutdown complete."
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
-
-def main():
 
     if not BOT_TOKEN:
 
@@ -842,64 +981,222 @@ def main():
             "TELEGRAM_CHAT_ID is missing."
         )
 
-    print("")
-    print(
-        "================================"
-    )
-    print(
-        "       MyLBRCEBot Started"
-    )
-    print(
-        "================================"
-    )
-    print("")
+    if not RENDER_EXTERNAL_URL:
 
-    application = (
+        raise RuntimeError(
+            "RENDER_EXTERNAL_URL is missing."
+        )
+
+    logger.info(
+        "Starting Telegram application..."
+    )
+
+    telegram_application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
 
     # -----------------------------------------------------
-    # Commands
+    # COMMANDS
     # -----------------------------------------------------
 
-    application.add_handler(
+    telegram_application.add_handler(
         CommandHandler(
             "start",
-            start_command
+            start_command,
         )
     )
 
-    application.add_handler(
+    telegram_application.add_handler(
         CommandHandler(
             "attendance",
-            attendance_command
+            attendance_command,
         )
     )
 
-    application.add_handler(
+    telegram_application.add_handler(
         CommandHandler(
             "status",
-            status_command
+            status_command,
         )
     )
 
     # -----------------------------------------------------
-    # Start Telegram polling
+    # BUTTONS
     # -----------------------------------------------------
 
-    application.run_polling(
-        allowed_updates=Update.ALL_TYPES
+    telegram_application.add_handler(
+        CallbackQueryHandler(
+            button_callback,
+        )
+    )
+
+    # -----------------------------------------------------
+    # TELEGRAM APPLICATION
+    # -----------------------------------------------------
+
+    await telegram_application.initialize()
+
+    await telegram_application.start()
+
+    # -----------------------------------------------------
+    # WEBHOOK
+    # -----------------------------------------------------
+
+    webhook_url = (
+        RENDER_EXTERNAL_URL.rstrip("/")
+        + "/telegram-webhook"
+    )
+
+    logger.info(
+        "Setting Telegram webhook: %s",
+        webhook_url,
+    )
+
+    await telegram_application.bot.set_webhook(
+        url=webhook_url,
+        secret_token=WEBHOOK_SECRET,
+        drop_pending_updates=True,
+    )
+
+    logger.info(
+        "Telegram webhook configured."
+    )
+
+    logger.info(
+        "MyLBRCEBot Started"
+    )
+
+    # -----------------------------------------------------
+    # BACKGROUND MONITOR
+    # -----------------------------------------------------
+
+    monitor_task = asyncio.create_task(
+        background_monitor()
+    )
+
+    logger.info(
+        "Background attendance monitor started."
     )
 
 
 # =========================================================
-# ENTRY POINT
+# SHUTDOWN
+# =========================================================
+
+@app.on_event("shutdown")
+async def shutdown():
+
+    global monitor
+    global telegram_application
+    global monitor_task
+
+    logger.info(
+        "Shutting down MyLBRCEBot..."
+    )
+
+    # -----------------------------------------------------
+    # STOP BACKGROUND TASK
+    # -----------------------------------------------------
+
+    if monitor_task:
+
+        monitor_task.cancel()
+
+        try:
+
+            await monitor_task
+
+        except asyncio.CancelledError:
+
+            pass
+
+        monitor_task = None
+
+    # -----------------------------------------------------
+    # CLOSE PLAYWRIGHT
+    # -----------------------------------------------------
+
+    if monitor:
+
+        try:
+
+            await monitor.close()
+
+        except Exception as exc:
+
+            logger.error(
+                "Error closing monitor: %s",
+                exc,
+            )
+
+        monitor = None
+
+    # -----------------------------------------------------
+    # STOP TELEGRAM
+    # -----------------------------------------------------
+
+    if telegram_application:
+
+        try:
+
+            await telegram_application.bot.delete_webhook()
+
+        except Exception as exc:
+
+            logger.warning(
+                "Could not delete webhook: %s",
+                exc,
+            )
+
+        try:
+
+            await telegram_application.stop()
+
+        except Exception as exc:
+
+            logger.warning(
+                "Telegram stop error: %s",
+                exc,
+            )
+
+        try:
+
+            await telegram_application.shutdown()
+
+        except Exception as exc:
+
+            logger.warning(
+                "Telegram shutdown error: %s",
+                exc,
+            )
+
+        telegram_application = None
+
+    logger.info(
+        "MyLBRCEBot shutdown complete."
+    )
+
+
+# =========================================================
+# LOCAL RUN
 # =========================================================
 
 if __name__ == "__main__":
 
-    main()
+    import uvicorn
+
+    port = int(
+        os.getenv(
+            "PORT",
+            "8000",
+        )
+    )
+
+    uvicorn.run(
+        "bot:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )

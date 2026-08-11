@@ -1,10 +1,10 @@
 import os
-import asyncio
 import logging
 from typing import Optional
 
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+
 from playwright.async_api import (
     async_playwright,
     Browser,
@@ -14,82 +14,174 @@ from playwright.async_api import (
 )
 
 
+# =========================================================
+# ENVIRONMENT
+# =========================================================
+
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+
+# =========================================================
+# LOGGING
+# =========================================================
 
 logger = logging.getLogger(__name__)
 
 
-ERP_LOGIN_URL = "https://erp.lbrce.ac.in/Login/"
-ERP_ATTENDANCE_URL = (
-    "https://erp.lbrce.ac.in/Discipline/StudentHistory.aspx"
+# =========================================================
+# ERP CONFIG
+# =========================================================
+
+ERP_LOGIN_URL = (
+    "https://erp.lbrce.ac.in/Login/"
 )
 
-USERNAME = os.getenv("LBRCE_USERNAME", "").strip()
-PASSWORD = os.getenv("LBRCE_PASSWORD", "").strip()
+ERP_ATTENDANCE_URL = (
+    "https://erp.lbrce.ac.in/"
+    "Discipline/StudentHistory.aspx"
+)
 
-YEAR = os.getenv("LBRCE_YEAR", "3").strip()
-SEM = os.getenv("LBRCE_SEM", "1").strip()
+USERNAME = os.getenv(
+    "LBRCE_USERNAME",
+    "",
+).strip()
 
+PASSWORD = os.getenv(
+    "LBRCE_PASSWORD",
+    "",
+).strip()
+
+YEAR = os.getenv(
+    "LBRCE_YEAR",
+    "3",
+).strip()
+
+SEM = os.getenv(
+    "LBRCE_SEM",
+    "1",
+).strip()
+
+
+# =========================================================
+# MONITOR
+# =========================================================
 
 class LBRCEMonitor:
 
     def __init__(self):
 
         self.playwright = None
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
+
+        self.browser: Optional[
+            Browser
+        ] = None
+
+        self.context: Optional[
+            BrowserContext
+        ] = None
+
+        self.page: Optional[
+            Page
+        ] = None
 
         self.logged_in = False
 
-    # =========================================================
+    # =====================================================
     # START BROWSER
-    # =========================================================
+    # =====================================================
 
     async def start(self):
 
-        logger.info("Starting browser...")
+        if self.browser:
 
-        self.playwright = await async_playwright().start()
+            logger.info(
+                "Browser already running."
+            )
 
-        self.browser = await self.playwright.chromium.launch(
-        headless=True,
-   )
+            return
 
-        self.context = await self.browser.new_context(
-            viewport={
-                "width": 1400,
-                "height": 900,
-            }
+        logger.info(
+            "Starting Playwright browser..."
         )
 
-        self.page = await self.context.new_page()
+        self.playwright = (
+            await async_playwright().start()
+        )
 
-        self.page.set_default_timeout(15000)
+        self.browser = (
+            await self.playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                ],
+            )
+        )
 
-        logger.info("Browser started.")
+        self.context = (
+            await self.browser.new_context(
+                viewport={
+                    "width": 1400,
+                    "height": 900,
+                },
+                ignore_https_errors=True,
+            )
+        )
 
-    # =========================================================
-    # CLOSE BROWSER
-    # =========================================================
+        self.page = (
+            await self.context.new_page()
+        )
+
+        self.page.set_default_timeout(
+            20000
+        )
+
+        logger.info(
+            "Browser started."
+        )
+
+    # =====================================================
+    # CLOSE
+    # =====================================================
 
     async def close(self):
 
+        logger.info(
+            "Closing Playwright browser..."
+        )
+
         try:
 
+            if self.page:
+
+                try:
+                    await self.page.close()
+                except Exception:
+                    pass
+
             if self.context:
-                await self.context.close()
+
+                try:
+                    await self.context.close()
+                except Exception:
+                    pass
 
             if self.browser:
-                await self.browser.close()
+
+                try:
+                    await self.browser.close()
+                except Exception:
+                    pass
 
             if self.playwright:
-                await self.playwright.stop()
+
+                try:
+                    await self.playwright.stop()
+                except Exception:
+                    pass
 
         except Exception as exc:
 
@@ -98,28 +190,41 @@ class LBRCEMonitor:
                 exc,
             )
 
-    # =========================================================
+        finally:
+
+            self.page = None
+            self.context = None
+            self.browser = None
+            self.playwright = None
+            self.logged_in = False
+
+    # =====================================================
     # LOGIN
-    # =========================================================
+    # =====================================================
 
     async def login(self):
 
         if not self.page:
+
             raise RuntimeError(
                 "Browser page is not initialized."
             )
 
         if not USERNAME:
+
             raise RuntimeError(
-                "LBRCE_USERNAME is missing in .env"
+                "LBRCE_USERNAME is missing."
             )
 
         if not PASSWORD:
+
             raise RuntimeError(
-                "LBRCE_PASSWORD is missing in .env"
+                "LBRCE_PASSWORD is missing."
             )
 
-        logger.info("Opening LBRCE login page...")
+        logger.info(
+            "Opening LBRCE login page..."
+        )
 
         await self.page.goto(
             ERP_LOGIN_URL,
@@ -127,16 +232,18 @@ class LBRCEMonitor:
             timeout=60000,
         )
 
-        await self.page.wait_for_timeout(2000)
+        await self.page.wait_for_timeout(
+            2000
+        )
 
         logger.info(
-            "Current URL: %s",
+            "Login URL: %s",
             self.page.url,
         )
 
-        # -----------------------------------------------------
-        # Find username
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # USERNAME
+        # -------------------------------------------------
 
         username = self.page.locator(
             "input[type='text'], "
@@ -146,9 +253,9 @@ class LBRCEMonitor:
             "input[id*='user']"
         ).first
 
-        # -----------------------------------------------------
-        # Find password
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # PASSWORD
+        # -------------------------------------------------
 
         password = self.page.locator(
             "input[type='password'], "
@@ -161,26 +268,26 @@ class LBRCEMonitor:
         if await username.count() == 0:
 
             raise RuntimeError(
-                "Username input was not found."
+                "Username field not found."
             )
 
         if await password.count() == 0:
 
             raise RuntimeError(
-                "Password input was not found."
+                "Password field not found."
             )
 
-        logger.info(
-            "Username/password fields found."
+        await username.fill(
+            USERNAME
         )
 
-        await username.fill(USERNAME)
+        await password.fill(
+            PASSWORD
+        )
 
-        await password.fill(PASSWORD)
-
-        # -----------------------------------------------------
-        # Find Login button
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # LOGIN BUTTON
+        # -------------------------------------------------
 
         login_button = self.page.locator(
             "input[type='submit'], "
@@ -189,7 +296,7 @@ class LBRCEMonitor:
             "button"
         )
 
-        login_clicked = False
+        clicked = False
 
         count = await login_button.count()
 
@@ -197,11 +304,21 @@ class LBRCEMonitor:
 
             try:
 
-                button = login_button.nth(i)
+                button = (
+                    login_button.nth(i)
+                )
 
-                text = (
-                    await button.inner_text()
-                ).strip().lower()
+                text = ""
+
+                try:
+
+                    text = (
+                        await button.inner_text()
+                    ).strip().lower()
+
+                except Exception:
+
+                    pass
 
                 value = (
                     await button.get_attribute(
@@ -215,62 +332,54 @@ class LBRCEMonitor:
                     or "login" in value
                 ):
 
-                    await button.click()
+                    await button.click(
+                        timeout=10000
+                    )
 
-                    login_clicked = True
+                    clicked = True
 
                     break
 
             except Exception:
+
                 continue
 
-        if not login_clicked:
+        if not clicked:
 
             raise RuntimeError(
-                "Login button could not be found."
+                "Login button not found."
             )
 
         logger.info(
             "Login button clicked."
         )
 
-        await self.page.wait_for_timeout(5000)
+        await self.page.wait_for_timeout(
+            5000
+        )
 
         logger.info(
             "After login URL: %s",
             self.page.url,
         )
 
-        # -----------------------------------------------------
-        # Check if still on Login page
-        # -----------------------------------------------------
-
         if "/Login" in self.page.url:
 
-            # Look for common error messages.
-            body_text = (
-                await self.page.locator(
-                    "body"
-                ).inner_text()
-            )
+            body = await self.page.locator(
+                "body"
+            ).inner_text()
 
             logger.error(
-                "ERP login appears to have failed."
+                "Login failed:\n%s",
+                body[:3000],
             )
 
-            logger.error(
-                "Login page text:\n%s",
-                body_text[:3000],
-            )
-
-            await self.page.screenshot(
-                path="login_failed.png",
-                full_page=True,
+            await self.save_debug_files(
+                "login_failed"
             )
 
             raise RuntimeError(
-                "LBRCE login failed. "
-                "Check username/password."
+                "LBRCE login failed."
             )
 
         self.logged_in = True
@@ -279,13 +388,14 @@ class LBRCEMonitor:
             "LBRCE login successful."
         )
 
-    # =========================================================
+    # =====================================================
     # OPEN ATTENDANCE PAGE
-    # =========================================================
+    # =====================================================
 
     async def open_attendance_page(self):
 
         if not self.page:
+
             raise RuntimeError(
                 "Browser page is not initialized."
             )
@@ -300,21 +410,23 @@ class LBRCEMonitor:
             timeout=60000,
         )
 
-        await self.page.wait_for_timeout(3000)
+        await self.page.wait_for_timeout(
+            3000
+        )
 
         logger.info(
             "Student History URL: %s",
             self.page.url,
         )
 
-        # -----------------------------------------------------
-        # If session expired, ERP redirects to Login.
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # SESSION EXPIRED
+        # -------------------------------------------------
 
         if "/Login" in self.page.url:
 
             logger.warning(
-                "ERP redirected to login page."
+                "Session expired. Logging in again."
             )
 
             self.logged_in = False
@@ -327,28 +439,30 @@ class LBRCEMonitor:
                 timeout=60000,
             )
 
-            await self.page.wait_for_timeout(3000)
+            await self.page.wait_for_timeout(
+                3000
+            )
 
         if "/Login" in self.page.url:
 
             raise RuntimeError(
-                "Could not open StudentHistory.aspx "
-                "because ERP session is not logged in."
+                "Could not open StudentHistory.aspx."
             )
 
         logger.info(
-            "Attendance page opened successfully."
+            "Attendance page opened."
         )
 
-    # =========================================================
+    # =====================================================
     # SELECT YEAR
-    # =========================================================
+    # =====================================================
 
     async def select_year(self):
 
         if not self.page:
+
             raise RuntimeError(
-                "Browser page is not initialized."
+                "Browser page not initialized."
             )
 
         logger.info(
@@ -359,28 +473,15 @@ class LBRCEMonitor:
             "#ContentPlaceHolder1_ddlYear"
         )
 
-        if await year_select.count() == 0:
-
-            raise RuntimeError(
-                "Year dropdown "
-                "#ContentPlaceHolder1_ddlYear "
-                "was not found."
-            )
-
-        logger.info(
-            "Year dropdown found."
+        await year_select.wait_for(
+            state="visible",
+            timeout=15000,
         )
 
         logger.info(
             "Selecting Year = %s",
             YEAR,
         )
-
-        # -----------------------------------------------------
-        # Select year.
-        #
-        # ASP.NET may trigger an AJAX postback.
-        # -----------------------------------------------------
 
         await year_select.select_option(
             YEAR
@@ -394,36 +495,29 @@ class LBRCEMonitor:
             "Year selected."
         )
 
-    # =========================================================
+    # =====================================================
     # SELECT SEMESTER
-    # =========================================================
+    # =====================================================
 
     async def select_semester(self):
 
         if not self.page:
+
             raise RuntimeError(
-                "Browser page is not initialized."
+                "Browser page not initialized."
             )
 
         logger.info(
             "Looking for Semester dropdown..."
         )
 
-        # Re-locate after AJAX update.
         semester_select = self.page.locator(
             "#ContentPlaceHolder1_ddlsem"
         )
 
-        if await semester_select.count() == 0:
-
-            raise RuntimeError(
-                "Semester dropdown "
-                "#ContentPlaceHolder1_ddlsem "
-                "was not found."
-            )
-
-        logger.info(
-            "Semester dropdown found."
+        await semester_select.wait_for(
+            state="visible",
+            timeout=15000,
         )
 
         logger.info(
@@ -443,20 +537,43 @@ class LBRCEMonitor:
             "Semester selected."
         )
 
-    # =========================================================
+    # =====================================================
+    # CHECK TABLE
+    # =====================================================
+
+    async def attendance_table_exists(self):
+
+        if not self.page:
+
+            return False
+
+        table = self.page.locator(
+            "#ContentPlaceHolder1_gvStdHistory"
+        )
+
+        try:
+
+            if await table.count() == 0:
+
+                return False
+
+            return await table.is_visible()
+
+        except Exception:
+
+            return False
+
+    # =====================================================
     # CLICK ATTENDANCE
-    # =========================================================
+    # =====================================================
 
     async def click_attendance(self):
 
         if not self.page:
-            raise RuntimeError(
-                "Browser page is not initialized."
-            )
 
-        logger.info(
-            "Looking for Attendance button..."
-        )
+            raise RuntimeError(
+                "Browser page not initialized."
+            )
 
         attendance_button = self.page.locator(
             "#ContentPlaceHolder1_btnAtt"
@@ -465,130 +582,216 @@ class LBRCEMonitor:
         if await attendance_button.count() == 0:
 
             raise RuntimeError(
-                "Attendance button "
-                "#ContentPlaceHolder1_btnAtt "
-                "was not found."
+                "Attendance button not found."
             )
 
         logger.info(
-            "Attendance button found."
+            "Clicking Attendance..."
         )
 
-        url_before = self.page.url
+        # -------------------------------------------------
+        # If table already exists, still click again.
+        # The ERP may refresh it through AJAX.
+        # -------------------------------------------------
 
-        logger.info(
-            "URL before Attendance: %s",
-            url_before,
-        )
+        for attempt in range(1, 4):
 
-        # -----------------------------------------------------
-        # Click the ASP.NET AJAX button.
-        #
-        # DO NOT use page.goto() here.
-        #
-        # The ERP updates the page using AJAX and keeps
-        # StudentHistory.aspx as the URL.
-        # -----------------------------------------------------
-
-        try:
-
-            async with self.page.expect_response(
-                lambda response:
-                    response.request.method == "POST"
-                    and "StudentHistory.aspx"
-                    in response.url,
-                timeout=15000,
-            ):
-
-                await attendance_button.click()
-
-        except PlaywrightTimeoutError:
-
-            logger.warning(
-                "POST response was not captured."
+            logger.info(
+                "Attendance click attempt %s/3",
+                attempt,
             )
-
-            # The click may still have happened.
-            # Continue and inspect the page.
 
             try:
 
-                await attendance_button.click(
-                    timeout=5000
+                # Re-locate every attempt because
+                # ASP.NET can replace the DOM.
+
+                attendance_button = (
+                    self.page.locator(
+                        "#ContentPlaceHolder1_btnAtt"
+                    )
                 )
 
-            except Exception:
-                pass
+                await attendance_button.wait_for(
+                    state="visible",
+                    timeout=10000,
+                )
 
-        await self.page.wait_for_timeout(
-            4000
-        )
+                await attendance_button.scroll_into_view_if_needed()
 
-        url_after = self.page.url
+                # -------------------------------------------------
+                # Try to observe a POST request.
+                # The ERP may use normal ASP.NET POST
+                # or asynchronous AJAX.
+                # -------------------------------------------------
 
-        logger.info(
-            "URL after Attendance: %s",
-            url_after,
-        )
+                try:
 
-        if url_before == url_after:
+                    async with self.page.expect_response(
+                        lambda response:
+                            response.request.method == "POST"
+                            and "StudentHistory.aspx"
+                            in response.url,
+                        timeout=12000,
+                    ):
 
-            logger.info(
-                "URL remained unchanged. "
-                "ASP.NET AJAX behavior is correct."
-            )
+                        await attendance_button.click(
+                            timeout=10000
+                        )
 
-        else:
+                except PlaywrightTimeoutError:
 
-            logger.warning(
-                "URL changed from %s to %s",
-                url_before,
-                url_after,
-            )
+                    logger.warning(
+                        "POST response not captured. "
+                        "Click may still have completed."
+                    )
+
+                    try:
+
+                        await attendance_button.click(
+                            timeout=5000
+                        )
+
+                    except Exception as exc:
+
+                        logger.warning(
+                            "Second click attempt failed: %s",
+                            exc,
+                        )
+
+                await self.page.wait_for_timeout(
+                    3000
+                )
+
+                # -------------------------------------------------
+                # Check for table.
+                # -------------------------------------------------
+
+                table = self.page.locator(
+                    "#ContentPlaceHolder1_gvStdHistory"
+                )
+
+                try:
+
+                    await table.wait_for(
+                        state="visible",
+                        timeout=12000,
+                    )
+
+                    logger.info(
+                        "Attendance table found."
+                    )
+
+                    return
+
+                except PlaywrightTimeoutError:
+
+                    logger.warning(
+                        "Attendance table not found "
+                        "after attempt %s.",
+                        attempt,
+                    )
+
+                # -------------------------------------------------
+                # Sometimes ERP AJAX update finishes late.
+                # Wait a little longer before retrying.
+                # -------------------------------------------------
+
+                await self.page.wait_for_timeout(
+                    3000
+                )
+
+                if await self.attendance_table_exists():
+
+                    logger.info(
+                        "Attendance table appeared "
+                        "after delayed AJAX update."
+                    )
+
+                    return
+
+            except Exception as exc:
+
+                logger.warning(
+                    "Attendance attempt %s failed: %s",
+                    attempt,
+                    exc,
+                )
+
+            # -----------------------------------------------------
+            # On failure, reload StudentHistory page and retry.
+            # This is important for the second/third polling cycle.
+            # -----------------------------------------------------
+
+            if attempt < 3:
+
+                logger.warning(
+                    "Reloading StudentHistory.aspx "
+                    "before retry..."
+                )
+
+                try:
+
+                    await self.page.goto(
+                        ERP_ATTENDANCE_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+
+                    await self.page.wait_for_timeout(
+                        2500
+                    )
+
+                    if "/Login" in self.page.url:
+
+                        self.logged_in = False
+
+                        await self.login()
+
+                        await self.page.goto(
+                            ERP_ATTENDANCE_URL,
+                            wait_until="domcontentloaded",
+                            timeout=60000,
+                        )
+
+                        await self.page.wait_for_timeout(
+                            2500
+                        )
+
+                    await self.select_year()
+
+                    await self.select_semester()
+
+                except Exception as exc:
+
+                    logger.warning(
+                        "Could not prepare retry: %s",
+                        exc,
+                    )
 
         # -----------------------------------------------------
-        # Wait for attendance table.
+        # ALL RETRIES FAILED
         # -----------------------------------------------------
 
-        table = self.page.locator(
-            "#ContentPlaceHolder1_gvStdHistory"
+        await self.save_debug_files(
+            "attendance_table_not_found"
         )
 
-        try:
-
-            await table.wait_for(
-                state="visible",
-                timeout=15000,
-            )
-
-        except PlaywrightTimeoutError:
-
-            logger.error(
-                "Attendance table not found."
-            )
-
-            await self.save_debug_files(
-                "attendance_table_not_found"
-            )
-
-            raise RuntimeError(
-                "Attendance table not found "
-                "after clicking Attendance."
-            )
-
-        logger.info(
-            "Attendance table found."
+        raise RuntimeError(
+            "Attendance table not found after "
+            "3 attempts."
         )
 
-    # =========================================================
+    # =====================================================
     # PARSE ATTENDANCE
-    # =========================================================
+    # =====================================================
 
     async def parse_attendance(self):
 
         if not self.page:
+
             raise RuntimeError(
-                "Browser page is not initialized."
+                "Browser page not initialized."
             )
 
         table = self.page.locator(
@@ -601,40 +804,36 @@ class LBRCEMonitor:
                 "Attendance table does not exist."
             )
 
-        # Get HTML.
         html = await table.inner_html()
 
         soup = BeautifulSoup(
             html,
-            "html.parser"
+            "html.parser",
         )
 
         rows = soup.find_all("tr")
 
         attendance = []
 
-        # -----------------------------------------------------
-        # First row is header.
-        # -----------------------------------------------------
-
         for row in rows[1:]:
 
             cells = row.find_all("td")
 
             if len(cells) < 5:
+
                 continue
 
             values = [
                 cell.get_text(
                     " ",
-                    strip=True
+                    strip=True,
                 )
                 for cell in cells
             ]
 
             try:
 
-                serial_number = values[0]
+                serial = values[0]
 
                 subject = values[1]
 
@@ -646,14 +845,13 @@ class LBRCEMonitor:
                     values[3]
                 )
 
-                percentage_text = (
-                    values[4]
-                    .replace("%", "")
-                    .strip()
-                )
-
                 percentage = float(
-                    percentage_text
+                    values[4]
+                    .replace(
+                        "%",
+                        "",
+                    )
+                    .strip()
                 )
 
             except (
@@ -670,7 +868,7 @@ class LBRCEMonitor:
 
             attendance.append(
                 {
-                    "serial": serial_number,
+                    "serial": serial,
                     "subject": subject,
                     "classes_held": classes_held,
                     "classes_present": classes_present,
@@ -685,20 +883,24 @@ class LBRCEMonitor:
             )
 
             raise RuntimeError(
-                "Attendance table was found "
-                "but no attendance rows could "
-                "be extracted."
+                "No attendance rows found."
             )
+
+        logger.info(
+            "Parsed %s attendance subjects.",
+            len(attendance),
+        )
 
         return attendance
 
-    # =========================================================
-    # GET OVERALL ATTENDANCE
-    # =========================================================
+    # =====================================================
+    # OVERALL ATTENDANCE
+    # =====================================================
 
     async def get_overall(self):
 
         if not self.page:
+
             return None
 
         element = self.page.locator(
@@ -708,8 +910,7 @@ class LBRCEMonitor:
         if await element.count() == 0:
 
             logger.warning(
-                "Overall attendance element "
-                "was not found."
+                "Overall attendance element not found."
             )
 
             return None
@@ -720,7 +921,10 @@ class LBRCEMonitor:
 
         text = (
             text
-            .replace("%", "")
+            .replace(
+                "%",
+                "",
+            )
             .strip()
         )
 
@@ -731,20 +935,20 @@ class LBRCEMonitor:
         except ValueError:
 
             logger.warning(
-                "Could not parse overall "
-                "attendance: %s",
+                "Could not parse overall attendance: %s",
                 text,
             )
 
             return None
 
-    # =========================================================
-    # GET MONTHLY ATTENDANCE
-    # =========================================================
+    # =====================================================
+    # MONTHLY ATTENDANCE
+    # =====================================================
 
     async def get_monthly_attendance(self):
 
         if not self.page:
+
             return []
 
         table = self.page.locator(
@@ -752,13 +956,20 @@ class LBRCEMonitor:
         )
 
         if await table.count() == 0:
+
             return []
 
-        html = await table.inner_html()
+        try:
+
+            html = await table.inner_html()
+
+        except Exception:
+
+            return []
 
         soup = BeautifulSoup(
             html,
-            "html.parser"
+            "html.parser",
         )
 
         rows = soup.find_all("tr")
@@ -770,12 +981,13 @@ class LBRCEMonitor:
             cells = row.find_all("td")
 
             if len(cells) < 4:
+
                 continue
 
             values = [
                 cell.get_text(
                     " ",
-                    strip=True
+                    strip=True,
                 )
                 for cell in cells
             ]
@@ -785,8 +997,12 @@ class LBRCEMonitor:
                 monthly.append(
                     {
                         "month": values[0],
-                        "total": int(values[1]),
-                        "present": int(values[2]),
+                        "total": int(
+                            values[1]
+                        ),
+                        "present": int(
+                            values[2]
+                        ),
                         "percentage": float(
                             values[3]
                         ),
@@ -802,9 +1018,9 @@ class LBRCEMonitor:
 
         return monthly
 
-    # =========================================================
-    # MAIN ATTENDANCE FUNCTION
-    # =========================================================
+    # =====================================================
+    # GET ATTENDANCE
+    # =====================================================
 
     async def get_attendance(self):
 
@@ -812,72 +1028,82 @@ class LBRCEMonitor:
 
             await self.start()
 
-        # -----------------------------------------------------
-        # Login if necessary.
-        # -----------------------------------------------------
-
         if not self.logged_in:
 
             await self.login()
 
-        # -----------------------------------------------------
-        # Open StudentHistory.aspx
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # First attempt
+        # -------------------------------------------------
 
-        await self.open_attendance_page()
+        try:
 
-        # -----------------------------------------------------
-        # Select Year.
-        # -----------------------------------------------------
+            await self.open_attendance_page()
 
-        await self.select_year()
+            await self.select_year()
 
-        # -----------------------------------------------------
-        # Select Semester.
-        # -----------------------------------------------------
+            await self.select_semester()
 
-        await self.select_semester()
+            await self.click_attendance()
 
-        # -----------------------------------------------------
-        # Click Attendance.
-        # -----------------------------------------------------
+        except Exception as exc:
 
-        await self.click_attendance()
+            logger.warning(
+                "Attendance page attempt failed: %s",
+                exc,
+            )
 
-        # -----------------------------------------------------
-        # Read subject-wise attendance.
-        # -----------------------------------------------------
+            # -------------------------------------------------
+            # One complete session reset.
+            # -------------------------------------------------
 
-        attendance = await self.parse_attendance()
+            await self.close()
 
-        # -----------------------------------------------------
-        # Read overall attendance.
-        # -----------------------------------------------------
+            await self.start()
 
-        overall = await self.get_overall()
+            await self.login()
 
-        # -----------------------------------------------------
-        # Read monthly attendance.
-        # -----------------------------------------------------
+            await self.open_attendance_page()
 
-        monthly = await self.get_monthly_attendance()
+            await self.select_year()
+
+            await self.select_semester()
+
+            await self.click_attendance()
+
+        # -------------------------------------------------
+        # Parse all attendance information.
+        # -------------------------------------------------
+
+        subjects = (
+            await self.parse_attendance()
+        )
+
+        overall = (
+            await self.get_overall()
+        )
+
+        monthly = (
+            await self.get_monthly_attendance()
+        )
 
         return {
-            "subjects": attendance,
+            "subjects": subjects,
             "overall": overall,
             "monthly": monthly,
         }
 
-    # =========================================================
-    # DEBUG FILES
-    # =========================================================
+    # =====================================================
+    # DEBUG
+    # =====================================================
 
     async def save_debug_files(
         self,
-        name: str
+        name: str,
     ):
 
         if not self.page:
+
             return
 
         try:
@@ -898,7 +1124,8 @@ class LBRCEMonitor:
                 file.write(html)
 
             logger.info(
-                "Debug files saved: %s.png / %s.html",
+                "Debug files saved: "
+                "%s.png / %s.html",
                 name,
                 name,
             )
@@ -906,14 +1133,14 @@ class LBRCEMonitor:
         except Exception as exc:
 
             logger.error(
-                "Could not save debug files: %s",
+                "Debug file error: %s",
                 exc,
             )
 
 
-# =============================================================
-# TEST FUNCTION
-# =============================================================
+# =========================================================
+# LOCAL TEST
+# =========================================================
 
 async def test_monitor():
 
@@ -923,9 +1150,11 @@ async def test_monitor():
 
         await monitor.start()
 
-        result = await monitor.get_attendance()
+        result = (
+            await monitor.get_attendance()
+        )
 
-        print("")
+        print()
         print(
             "================================"
         )
@@ -951,7 +1180,7 @@ async def test_monitor():
 
         print(
             "Overall:",
-            result["overall"]
+            result["overall"],
         )
 
         print(
@@ -983,8 +1212,14 @@ async def test_monitor():
         await monitor.close()
 
 
+# =========================================================
+# TEST ENTRY
+# =========================================================
+
 if __name__ == "__main__":
+
+    import asyncio
 
     asyncio.run(
         test_monitor()
-    )   
+    )
