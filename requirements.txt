@@ -1,5 +1,5 @@
 python-telegram-bot
-playwright
+playwright==1.62.0
 beautifulsoup4
 python-dotenv
 fastapi
